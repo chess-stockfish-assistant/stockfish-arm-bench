@@ -20,9 +20,10 @@ jobs:
             mv src-$v/src/stockfish ./sf-$v
           done
           # Same positions for both versions: the standard-chess FENs of 17.1's bench list
-          # (everything before its first setoption line, which starts the Chess960 ones).
-          awk '/setoption/{exit} match($0, /"[^"]+ [wb] [-KQkq]+ [-a-h1-8]+ [0-9]+ [0-9]+"/){print substr($0, RSTART+1, RLENGTH-2)}' \
+          # (everything before "UCI_Chess960 value true", where the Chess960 ones start).
+          awk '/UCI_Chess960 value true/{exit} match($0, /"[^"]+ [wb] [-KQkq]+ [-a-h1-8]+ [0-9]+ [0-9]+"/){print substr($0, RSTART+1, RLENGTH-2)}' \
             src-17.1/src/benchmark.cpp > positions.fen
+          test "$(wc -l < positions.fen)" -ge 30 || { echo "too few positions"; exit 1; }
           wc -l positions.fen
       - name: Time to depth (3 interleaved rounds)
         run: |
