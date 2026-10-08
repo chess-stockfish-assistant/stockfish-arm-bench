@@ -1,0 +1,71 @@
+name: bench
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  bench:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - name: CPU
+        run: |
+          lscpu
+          grep -m1 -i '^Features' /proc/cpuinfo
+          nproc
+      - name: Build
+        run: |
+          set -e
+          for v in 17.1 19; do
+            curl -sSL -o sf.tgz https://github.com/official-stockfish/Stockfish/archive/refs/tags/sf_$v.tar.gz
+            mkdir -p src-$v && tar xzf sf.tgz -C src-$v --strip-components=1
+            (cd src-$v/src && make net >/dev/null)
+            for a in armv8 armv8-dotprod; do
+              (cd src-$v/src && make clean >/dev/null && make -j"$(nproc)" build ARCH=$a COMP=gcc >/dev/null)
+              mv src-$v/src/stockfish ./sf-$v-$a
+              ls -la sf-$v-$a
+            done
+          done
+      - name: Throughput (bench, depth 13, 3 interleaved rounds)
+        run: |
+          echo "version,arch,threads,round,nodes,ms,nps" > nps.csv
+          for r in 1 2 3; do
+            for v in 17.1 19; do for a in armv8 armv8-dotprod; do for t in 1 2 4; do
+              out=$(./sf-$v-$a bench 64 $t 13 default depth 2>&1)
+              n=$(echo "$out" | awk -F: '/^Nodes searched/{gsub(/ /,"",$2);print $2}')
+              ms=$(echo "$out" | awk -F: '/^Total time/{gsub(/[^0-9]/,"",$2);print $2}')
+              s=$(echo "$out" | awk -F: '/^Nodes\/second/{gsub(/ /,"",$2);print $2}')
+              echo "$v,$a,$t,$r,$n,$ms,$s" | tee -a nps.csv
+            done; done; done
+          done
+      - name: Time to depth (bench positions, average ms per position)
+        run: |
+          echo "version,arch,threads,depth,total_ms,positions,ms_per_position" > depth.csv
+          for v in 17.1 19; do for a in armv8 armv8-dotprod; do for t in 1 2 4; do for d in 5 10 15; do
+            out=$(./sf-$v-$a bench 64 $t $d default depth 2>&1)
+            ms=$(echo "$out" | awk -F: '/^Total time/{gsub(/[^0-9]/,"",$2);print $2}')
+            p=$(echo "$out" | grep -c '^Position:')
+            echo "$v,$a,$t,$d,$ms,$p,$(( ms / (p>0?p:1) ))" | tee -a depth.csv
+          done; done; done; done
+      - name: Summary
+        run: |
+          python3 - <<'PY'
+          import csv, statistics as st
+          rows=list(csv.DictReader(open('nps.csv')))
+          agg={}
+          for r in rows: agg.setdefault((r['version'],r['arch'],r['threads']),[]).append(int(r['nps']))
+          print('version arch threads median_nps')
+          for k,v in sorted(agg.items()): print(*k, int(st.median(v)))
+          for ver in ('17.1','19'):
+            for t in ('1','2','4'):
+              b=st.median(agg[(ver,'armv8',t)]); d=st.median(agg[(ver,'armv8-dotprod',t)])
+              print(f'dotprod gain {ver} threads={t}: {100*(d/b-1):+.1f}%')
+            for a in ('armv8','armv8-dotprod'):
+              one=st.median(agg[(ver,a,'1')])
+              print(f'thread scaling {ver} {a}: 2t x{st.median(agg[(ver,a,"2")])/one:.2f}  4t x{st.median(agg[(ver,a,"4")])/one:.2f}')
+          print(open('depth.csv').read())
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: results
+          path: '*.csv'
