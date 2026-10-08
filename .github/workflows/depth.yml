@@ -1,0 +1,57 @@
+name: depth
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/depth.yml']
+jobs:
+  depth:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - name: Build (dotprod) and shared positions
+        run: |
+          set -e
+          lscpu | grep -E 'Model name|^CPU\(s\)'
+          for v in 17.1 19; do
+            curl -sSL -o sf.tgz https://github.com/official-stockfish/Stockfish/archive/refs/tags/sf_$v.tar.gz
+            mkdir -p src-$v && tar xzf sf.tgz -C src-$v --strip-components=1
+            (cd src-$v/src && make net >/dev/null && make -j"$(nproc)" build ARCH=armv8-dotprod COMP=gcc >/dev/null)
+            mv src-$v/src/stockfish ./sf-$v
+          done
+          # Same positions for both versions: the standard-chess FENs of 17.1's bench list
+          # (everything before its first setoption line, which starts the Chess960 ones).
+          awk '/setoption/{exit} match($0, /"[^"]+ [wb] [-KQkq]+ [-a-h1-8]+ [0-9]+ [0-9]+"/){print substr($0, RSTART+1, RLENGTH-2)}' \
+            src-17.1/src/benchmark.cpp > positions.fen
+          wc -l positions.fen
+      - name: Time to depth (3 interleaved rounds)
+        run: |
+          echo "version,threads,depth,round,total_ms,nodes" > depth.csv
+          for r in 1 2 3; do for v in 17.1 19; do for t in 1 2 3 4; do for d in 12 15 18; do
+            out=$(./sf-$v bench 64 $t $d positions.fen depth 2>&1)
+            ms=$(echo "$out" | awk -F: '/^Total time/{gsub(/[^0-9]/,"",$2);print $2}')
+            n=$(echo "$out" | awk -F: '/^Nodes searched/{gsub(/[^0-9]/,"",$2);print $2}')
+            echo "$v,$t,$d,$r,$ms,$n" | tee -a depth.csv
+          done; done; done; done
+      - name: Summary
+        run: |
+          python3 - <<'PY'
+          import csv, statistics as st
+          npos = sum(1 for _ in open('positions.fen'))
+          rows = list(csv.DictReader(open('depth.csv')))
+          agg = {}
+          for r in rows: agg.setdefault((r['version'], int(r['threads']), int(r['depth'])), []).append((int(r['total_ms']), int(r['nodes'])))
+          print(f'positions: {npos}')
+          print('version depth threads median_ms_per_position min max speedup_vs_1t median_nodes_per_position')
+          for v in ('17.1', '19'):
+            for d in (12, 15, 18):
+              one = st.median(ms for ms, _ in agg[(v, 1, d)])
+              for t in (1, 2, 3, 4):
+                ms = [m for m, _ in agg[(v, t, d)]]; nodes = [n for _, n in agg[(v, t, d)]]
+                print(v, d, t, round(st.median(ms) / npos), round(min(ms) / npos), round(max(ms) / npos),
+                      f'x{one / st.median(ms):.2f}', round(st.median(nodes) / npos))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: depth-results
+          path: '*.csv'

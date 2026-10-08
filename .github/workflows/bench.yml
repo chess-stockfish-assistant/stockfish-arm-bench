@@ -1,8 +1,6 @@
 name: bench
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
 jobs:
   bench:
     runs-on: ubuntu-24.04-arm
